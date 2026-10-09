@@ -1,0 +1,11 @@
+{
+  "description": "Turn overwhelming group chats into a clear, evidence-linked catch-up with Google Gemini.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  },
+  "title": "Unread \u2014 catch up on group chats"
+}
