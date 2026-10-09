@@ -1,4 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { LANGUAGES, supportedLanguage } from '../../supabase/functions/_shared/languages'
+export { LANGUAGES }
 
 // utils/supabase/info.tsx is generated when a Supabase project is connected.
 const infoModules = import.meta.glob<{ projectId: string; publicAnonKey: string }>('/utils/supabase/info.tsx', { eager: true })
@@ -7,15 +9,24 @@ const info = Object.values(infoModules)[0] ?? null
 /** Route prefix of the generated Supabase Edge Function server. */
 const FUNCTION_ROUTE = 'make-server-82138c68'
 
-export const LANGUAGES = ['English', 'Hindi', 'Bengali', 'Tamil', 'Telugu', 'Marathi', 'Gujarati', 'Kannada', 'Malayalam', 'Punjabi', 'Odia', 'Urdu', 'Assamese', 'Spanish', 'French', 'German', 'Portuguese', 'Italian', 'Russian', 'Arabic', 'Chinese (Simplified)', 'Japanese', 'Korean', 'Indonesian', 'Turkish', 'Vietnamese', 'Thai', 'Swahili'] as const
-
 const LANG_KEY = 'unread-language'
+let sessionLanguage: string | null = null
 export function getLanguage(): string {
-  const l = localStorage.getItem(LANG_KEY)
-  return l && (LANGUAGES as readonly string[]).includes(l) ? l : 'English'
+  if (sessionLanguage) return sessionLanguage
+  try {
+    const l = localStorage.getItem(LANG_KEY)
+    return supportedLanguage(l)
+  } catch {
+    return 'English'
+  }
 }
 export function setLanguage(l: string) {
-  localStorage.setItem(LANG_KEY, l)
+  sessionLanguage = supportedLanguage(l)
+  try {
+    localStorage.setItem(LANG_KEY, sessionLanguage)
+  } catch {
+    // Storage may be disabled; language remains available in React state.
+  }
 }
 
 export const backendConfigured = !!info?.projectId && !!info?.publicAnonKey
@@ -69,7 +80,9 @@ async function accessToken(): Promise<string> {
 type Action = 'analyze' | 'ask' | 'extract'
 
 async function once<T>(action: Action, body: unknown, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw new ApiError('aborted', MESSAGES.aborted)
   const token = await accessToken()
+  if (signal.aborted) throw new ApiError('aborted', MESSAGES.aborted)
   let res: Response
   try {
     res = await fetch(`https://${info!.projectId}.supabase.co/functions/v1/${FUNCTION_ROUTE}/${action}`, {
@@ -85,22 +98,34 @@ async function once<T>(action: Action, body: unknown, signal: AbortSignal): Prom
   const json = (await res.json().catch(() => null)) as { data?: T; error?: { code?: string; message?: string } } | null
   if (!res.ok) {
     const code = (json?.error?.code as ApiErrorCode) ?? (res.status === 401 ? 'auth' : res.status === 429 ? 'rate_limit' : res.status === 413 ? 'too_large' : 'server')
-    const known = code in MESSAGES ? code : 'server'
+    const known = Object.prototype.hasOwnProperty.call(MESSAGES, code) ? code : 'server'
     throw new ApiError(known, known === 'auth' ? MESSAGES.auth : json?.error?.message || MESSAGES[known])
   }
   if (!json || json.data === undefined) throw new ApiError('invalid_response', MESSAGES.invalid_response)
   return json.data
 }
 
-/** Calls the protected Gemini function with one retry for transient failures. */
+/** Retries transport failures only; provider fallbacks belong to the server. */
 export async function callGemini<T>(action: Action, body: unknown, signal: AbortSignal): Promise<T> {
   if (!backendConfigured) throw new ApiError('not_connected', MESSAGES.not_connected)
   try {
     return await once<T>(action, body, signal)
   } catch (e) {
-    const transient = e instanceof ApiError && (e.code === 'network' || e.code === 'server' || e.code === 'timeout')
+    const transient = e instanceof ApiError && e.code === 'network'
     if (!transient || signal.aborted) throw e
-    await new Promise((r) => setTimeout(r, 900))
+    await new Promise<void>((resolve, reject) => {
+      const cancel = () => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', cancel)
+        reject(new ApiError('aborted', MESSAGES.aborted))
+      }
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', cancel)
+        resolve()
+      }, 900)
+      signal.addEventListener('abort', cancel, { once: true })
+      if (signal.aborted) cancel()
+    })
     return once<T>(action, body, signal)
   }
 }

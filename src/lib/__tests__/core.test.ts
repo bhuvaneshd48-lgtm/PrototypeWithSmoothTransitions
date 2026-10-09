@@ -56,6 +56,10 @@ describe('parsers', () => {
     expect(r.notes.join(' ')).toMatch(/1 media file/)
     await expect(parseZip(zipSync({ 'a.jpg': new Uint8Array([1]) }))).rejects.toThrow(/No chat text/)
   })
+  it('rejects ZIP text that exceeds the expanded size limit', async () => {
+    const zip = zipSync({ '_chat.txt': strToU8('x'.repeat(8 * 1024 * 1024 + 1)) })
+    await expect(parseZip(zip)).rejects.toThrow(/expanded chat text/)
+  })
 })
 
 const msgs: ChatMessage[] = [
@@ -78,6 +82,17 @@ describe('privacy mask', () => {
     const json = JSON.stringify(toPayload(prepared))
     expect(Object.keys(toPayload(prepared)[0]).sort()).toEqual(['id', 'sender', 'text', 'timestamp'])
     expect(json).not.toContain('alex@uni.edu')
+  })
+  it('uses one placeholder mapping across messages and follow-up questions', () => {
+    const settings = { email: true, phone: false, url: false, customTerms: [] }
+    const context = [
+      { ...msgs[0], text: 'first@uni.edu then second@uni.edu' },
+      { ...msgs[1], text: 'Ask second@uni.edu' },
+      { ...msgs[1], id: '__previous', text: 'What did second@uni.edu say?' },
+    ]
+    const masked = maskMessages(context, settings)
+    expect(masked.prepared[1].text).toContain('[EMAIL_2]')
+    expect(masked.prepared[2].text).toContain('[EMAIL_2]')
   })
 })
 

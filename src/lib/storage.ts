@@ -17,7 +17,10 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(CONVERSATIONS)) db.createObjectStore(CONVERSATIONS, { keyPath: 'id' })
       if (!db.objectStoreNames.contains(SHARE_INBOX)) db.createObjectStore(SHARE_INBOX, { keyPath: 'id', autoIncrement: true })
     }
-    req.onsuccess = () => resolve(req.result)
+    req.onsuccess = () => {
+      req.result.onversionchange = () => req.result.close()
+      resolve(req.result)
+    }
     req.onerror = () => reject(req.error)
   })
 }
@@ -34,6 +37,7 @@ function tx<T>(db: IDBDatabase, store: string, mode: IDBTransactionMode, fn: (s:
 
 export type ConversationRepository = {
   persistent: boolean
+  close(): void
   list(): Promise<ConversationRecord[]>
   put(record: ConversationRecord): Promise<void>
   remove(id: string): Promise<void>
@@ -50,6 +54,7 @@ function memoryRepository(): ConversationRepository {
   const items = new Map<string, ConversationRecord>()
   return {
     persistent: false,
+    close: () => undefined,
     list: async () => [...items.values()].sort((a, b) => b.importedAt.localeCompare(a.importedAt)),
     put: async (r) => void items.set(r.id, r),
     remove: async (id) => void items.delete(id),
@@ -66,6 +71,7 @@ export async function createRepository(): Promise<ConversationRepository> {
   }
   return {
     persistent: true,
+    close: () => db.close(),
     async list() {
       const all = ((await tx<unknown[]>(db, CONVERSATIONS, 'readonly', (s) => s.getAll())) ?? []).map(migrate).filter(Boolean) as ConversationRecord[]
       return all.sort((a, b) => b.importedAt.localeCompare(a.importedAt))
@@ -84,9 +90,17 @@ export async function consumeShareInbox(): Promise<SharedItem[]> {
   } catch {
     return []
   }
-  const items = ((await tx<SharedItem[]>(db, SHARE_INBOX, 'readonly', (s) => s.getAll())) ?? []) as SharedItem[]
-  await tx(db, SHARE_INBOX, 'readwrite', (s) => s.clear())
-  return items.sort((a, b) => a.receivedAt - b.receivedAt)
+  try {
+    // Read and clear atomically so a concurrent share isn't erased between transactions.
+    const items = (await tx<SharedItem[]>(db, SHARE_INBOX, 'readwrite', (store) => {
+      const request = store.getAll()
+      store.clear()
+      return request
+    })) ?? []
+    return items.sort((a, b) => a.receivedAt - b.receivedAt)
+  } finally {
+    db.close()
+  }
 }
 
 export function sharedItemToFile(item: SharedItem): File | null {
