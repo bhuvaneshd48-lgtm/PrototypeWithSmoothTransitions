@@ -1,4 +1,4 @@
-import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
 // utils/supabase/info.tsx is generated when a Supabase project is connected.
 const infoModules = import.meta.glob<{ projectId: string; publicAnonKey: string }>('/utils/supabase/info.tsx', { eager: true })
@@ -54,6 +54,8 @@ const g = globalThis as { __unreadSupabase?: SupabaseClient }
 
 async function accessToken(): Promise<string> {
   if (!info) throw new ApiError('not_connected', MESSAGES.not_connected)
+  // Loaded on first AI request only; keeps ~200 kB out of the initial bundle.
+  const { createClient } = await import('@supabase/supabase-js')
   g.__unreadSupabase ??= createClient(`https://${info.projectId}.supabase.co`, info.publicAnonKey, { auth: { persistSession: true, storageKey: 'unread-auth' } })
   const client = g.__unreadSupabase
   const { data } = await client.auth.getSession()

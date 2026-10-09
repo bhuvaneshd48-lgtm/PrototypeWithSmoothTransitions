@@ -152,7 +152,7 @@ All results below were actually run or reported in this project.
 | End-to-end analysis | Manual, by the user, with a real WhatsApp chat | User: "It's working. It's really good and it's user-friendly also." |
 | "Since I last read" / Copy catch-up | Manual | **Pending** user verification |
 
-**Known improvement opportunities:** code-split the large bundle; show clearer loading stages ("Retrying, Gemini is busy…"); test the mobile layout; add a README.
+**Known improvement opportunities:** (bundle code-splitting done: initial JS −58%); show clearer loading stages ("Retrying, Gemini is busy…"); test the mobile layout; add a README.
 
 ---
 
@@ -171,3 +171,4 @@ All results below were actually run or reported in this project.
 |---|---|---|---|---|
 | Hackathon | Created `prompt.md` from the master prompt ("Now understand my project idea, prepare the development plan, and generate the initial prompt.md.") | Figma Make AI agent | `prompt.md` | Created retroactively; to be updated with each significant change |
 | Hackathon | "ready to push": pre-push check (server file intact, `prompt.md` present) before the final GitHub push | Figma Make AI agent | `supabase/functions/server/index.tsx`, `prompt.md` | Server file verified/restored; user pushes via Make Settings → GitHub |
+| Hackathon | "can you make the code quality more better ,to its best efficency" | Figma Make AI agent | `src/App.tsx`, `src/lib/api.ts`, `src/lib/parsers/index.ts`, `src/components/Workspace.tsx`, `src/lib/__tests__/core.test.ts` | Lazy-loaded Supabase SDK, fflate and the Review/Workspace/Settings screens; memoized derived data in Workspace. Production initial JS 682.7 kB → 283.2 kB (gzip 203.9 → 92.5 kB). `oxfmt` was tried but produced invalid TypeScript (stripped `;` in inline types), so it was fully reverted. Verified: `tsc` OK, 12/12 tests, production build OK |

@@ -47,14 +47,14 @@ describe('parsers', () => {
     expect(() => parseJson('{bad')).toThrow(ImportError)
   })
 
-  it('selects the chat entry from a WhatsApp zip and ignores media', () => {
+  it('selects the chat entry from a WhatsApp zip and ignores media', async () => {
     expect(chooseZipChatEntry(['IMG-1.jpg', 'notes.txt', '_chat.txt'])).toBe('_chat.txt')
     expect(chooseZipChatEntry(['a/WhatsApp Chat with Team.txt', 'b.txt'])).toBe('a/WhatsApp Chat with Team.txt')
     const zip = zipSync({ '_chat.txt': strToU8(WA_ANDROID), 'IMG-1.jpg': new Uint8Array([1, 2, 3]) })
-    const r = parseZip(zip)
+    const r = await parseZip(zip)
     expect(r.messages).toHaveLength(2)
     expect(r.notes.join(' ')).toMatch(/1 media file/)
-    expect(() => parseZip(zipSync({ 'a.jpg': new Uint8Array([1]) }))).toThrow(/No chat text/)
+    await expect(parseZip(zipSync({ 'a.jpg': new Uint8Array([1]) }))).rejects.toThrow(/No chat text/)
   })
 })
 

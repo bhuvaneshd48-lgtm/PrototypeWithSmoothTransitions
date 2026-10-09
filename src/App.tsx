@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import { ArrowLeft, HardDrive, Languages, Moon, Settings, Sparkles, Sun } from 'lucide-react'
 import type { AskAnswer, ConversationRecord, ParseResult, SourceType, UrgencyLevel } from '@/types'
@@ -13,10 +13,15 @@ import ImportPanel from '@/components/ImportPanel'
 import Landing from '@/components/landing/Landing'
 import Curtain from '@/components/Curtain'
 import { scrollToTarget, startSmoothScroll, stopSmoothScroll } from '@/lib/scroll'
-import ReviewPanel, { type Draft } from '@/components/ReviewPanel'
-import Workspace, { type AnalysisStatus } from '@/components/Workspace'
+import type { Draft } from '@/components/ReviewPanel'
+import type { AnalysisStatus } from '@/components/Workspace'
 import ConversationRail from '@/components/ConversationRail'
-import SettingsDialog, { type Preferences } from '@/components/SettingsDialog'
+import type { Preferences } from '@/components/SettingsDialog'
+
+// Screens not needed for the first paint are split into their own chunks.
+const ReviewPanel = lazy(() => import('@/components/ReviewPanel'))
+const Workspace = lazy(() => import('@/components/Workspace'))
+const SettingsDialog = lazy(() => import('@/components/SettingsDialog'))
 
 type View = 'import' | 'review' | 'workspace'
 type InstallPrompt = Event & { prompt: () => Promise<void> }
@@ -351,6 +356,7 @@ export default function App() {
         <Curtain token={view} reduced={reduced} label={view === 'review' ? 'Review' : view === 'workspace' ? 'Catch-up' : 'Import'} />
 
         <div className="relative pt-4">
+          <Suspense fallback={null}>
           <AnimatePresence mode="wait">
             {view === 'import' && booted ? (
               <motion.div key="import" exit={{ opacity: 0, y: -40, filter: 'blur(10px)' }} transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}>
@@ -412,9 +418,11 @@ export default function App() {
               />
             ) : null}
           </AnimatePresence>
+          </Suspense>
         </div>
 
-        <SettingsDialog
+        <Suspense fallback={null}>
+          <SettingsDialog
           open={settingsOpen}
           onClose={() => setSettingsOpen(false)}
           prefs={prefs}
@@ -428,6 +436,7 @@ export default function App() {
             setInstallPrompt(null)
           }}
         />
+        </Suspense>
       </div>
     </MotionConfig>
   )

@@ -1,4 +1,3 @@
-import { unzipSync } from 'fflate'
 import type { ChatMessage, ParseResult } from '@/types'
 
 export const LIMITS = {
@@ -182,7 +181,9 @@ export function chooseZipChatEntry(names: string[]): string | null {
   return txt.find((n) => base(n) === '_chat.txt') ?? txt.find((n) => /^WhatsApp Chat/i.test(base(n))) ?? txt[0] ?? null
 }
 
-export function parseZip(bytes: Uint8Array): ParseResult {
+/** fflate is loaded on demand so it isn't part of the initial bundle. */
+export async function parseZip(bytes: Uint8Array): Promise<ParseResult> {
+  const { unzipSync } = await import('fflate')
   let mediaSkipped = 0
   const names: string[] = []
   let files: Record<string, Uint8Array>
