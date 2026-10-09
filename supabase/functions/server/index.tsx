@@ -6,7 +6,8 @@ import * as kv from "./kv_store.tsx";
 
 const app = new Hono();
 const PREFIX = "/make-server-82138c68";
-const MODEL = "gemini-2.5-flash";
+const MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash", "gemini-2.0-flash-lite"];
+let MODEL = MODELS[0];
 const MAX_CHARS = 400_000;
 const RATE = { windowMs: 10 * 60 * 1000, max: 30 };
 
@@ -26,16 +27,16 @@ const fail = (c: any, status: number, code: string, message: string) => c.json({
 
 const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
 
-async function userId(c: any): Promise<string | null> {
+// Supabase's gateway already rejects requests without a valid project key/JWT before they reach here.
+// Signed-in users are limited per account; everyone else (public key) per client IP.
+async function userId(c: any): Promise<string> {
   const token = c.req.header("Authorization")?.split(" ")[1];
-  if (!token) return null;
-  // Public anon key (used when anonymous sign-ins are disabled): rate-limited per client IP.
-  if (token === Deno.env.get("SUPABASE_ANON_KEY")) {
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0].trim() || c.req.header("cf-connecting-ip") || "unknown";
-    return `ip:${ip}`;
+  if (token) {
+    const { data } = await supabase.auth.getUser(token).catch(() => ({ data: { user: null } }));
+    if (data.user) return data.user.id;
   }
-  const { data, error } = await supabase.auth.getUser(token);
-  return error || !data.user ? null : data.user.id;
+  const ip = c.req.header("x-forwarded-for")?.split(",")[0].trim() || c.req.header("cf-connecting-ip") || "unknown";
+  return `ip:${ip}`;
 }
 
 async function rateLimited(uid: string): Promise<boolean> {
@@ -79,13 +80,11 @@ const EXTRACT_PROMPT = `Transcribe the chat messages visible in these screenshot
 Return JSON: {"messages": [{"sender": string|null, "timestamp": string|null, "text": string}], "warnings": string[]}
 Add a warning for anything cut off or unreadable. Keep message text in its original language.`;
 
-async function gemini(parts: unknown[], system: string): Promise<{ data: unknown } | { error: [number, string, string] }> {
-  const key = Deno.env.get("GEMINI_API_KEY");
-  if (!key) return { error: [503, "not_connected", "GEMINI_API_KEY is not set on the server."] };
+async function callModel(model: string, key: string, parts: unknown[], system: string): Promise<{ data: unknown } | { error: [number, string, string]; retryNext?: boolean }> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 90_000);
   try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": key },
       body: JSON.stringify({
@@ -97,14 +96,21 @@ async function gemini(parts: unknown[], system: string): Promise<{ data: unknown
     });
     const json = await res.json().catch(() => null);
     if (!res.ok) {
-      console.log("Gemini error", res.status, JSON.stringify(json));
-      if (res.status === 429) return { error: [429, "rate_limit", "Gemini is rate limiting requests. Try again shortly."] };
-      if (res.status === 400 && /token|too large|exceeds/i.test(JSON.stringify(json))) return { error: [413, "too_large", "This conversation is too large for one request."] };
-      return { error: [502, "server", "Gemini request failed."] };
+      const msg: string = json?.error?.message ?? `HTTP ${res.status}`;
+      const reason: string = json?.error?.status ?? "";
+      console.log("Gemini error", model, res.status, JSON.stringify(json));
+      if (/API key not valid|API_KEY_INVALID/i.test(msg) || reason === "PERMISSION_DENIED" || res.status === 403)
+        return { error: [502, "server", `Gemini rejected the API key: ${msg}. Check GEMINI_API_KEY in Supabase secrets.`] };
+      if (res.status === 400 && /token|too large|exceeds/i.test(msg)) return { error: [413, "too_large", "This conversation is too large for one request."] };
+      // Model unavailable, overloaded, or quota for this model exhausted: try the next model.
+      const retryNext = res.status === 404 || res.status === 429 || res.status >= 500;
+      if (res.status === 429) return { error: [429, "rate_limit", `Gemini quota/rate limit: ${msg}`], retryNext };
+      if (res.status === 503) return { error: [503, "server", `Gemini is overloaded right now (high demand). Wait a minute and press Retry. (${model}, 503)`], retryNext };
+      return { error: [502, "server", `Gemini error (${model}, ${res.status}): ${msg}`], retryNext };
     }
     const cand = json?.candidates?.[0];
     if (!cand || cand.finishReason === "SAFETY" || json?.promptFeedback?.blockReason) return { error: [422, "safety", "Gemini declined to process this content."] };
-    const text = (cand.content?.parts ?? []).map((p: any) => p.text ?? "").join("");
+    const text = (cand.content?.parts ?? []).map((p: any) => p.text ?? "").join("").replace(/^```(?:json)?\s*|\s*```$/g, "");
     try {
       return { data: JSON.parse(text) };
     } catch {
@@ -113,10 +119,37 @@ async function gemini(parts: unknown[], system: string): Promise<{ data: unknown
   } catch (e) {
     if (ctrl.signal.aborted) return { error: [504, "timeout", "Gemini took too long to respond."] };
     console.log("Gemini fetch failure", e);
-    return { error: [502, "network", "Could not reach Gemini."] };
+    return { error: [502, "network", `Could not reach Gemini: ${e}`], retryNext: true };
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function gemini(parts: unknown[], system: string): Promise<{ data: unknown } | { error: [number, string, string] }> {
+  const key = Deno.env.get("GEMINI_API_KEY")?.trim();
+  if (!key) return { error: [503, "not_connected", "GEMINI_API_KEY is not set on the server."] };
+  // Keep the most informative failure: a 404 "model not found" should never hide a real quota/overload error.
+  let best: { error: [number, string, string] } | null = null;
+  const errors: string[] = [];
+  for (const model of MODELS) {
+    let r = await callModel(model, key, parts, system);
+    // Overloaded (503): one short retry on the same model before moving on.
+    // Overloaded (503): back off and retry the same model twice before moving on.
+    for (const wait of [2000, 5000]) {
+      if (!("error" in r && r.error[2].includes(", 503)"))) break;
+      await new Promise((res) => setTimeout(res, wait));
+      r = await callModel(model, key, parts, system);
+    }
+    if ("data" in r) {
+      MODEL = model;
+      return r;
+    }
+    errors.push(`${model}: ${r.error[2]}`);
+    if (!best || (best.error[2].includes(", 404)") && !r.error[2].includes(", 404)"))) best = { error: r.error };
+    if (!r.retryNext) return { error: r.error };
+  }
+  console.log("All Gemini models failed", errors);
+  return best!;
 }
 
 app.get(`${PREFIX}/health`, (c) => c.json({ status: "ok", gemini: !!Deno.env.get("GEMINI_API_KEY") }));
@@ -125,7 +158,6 @@ app.post(`${PREFIX}/:action`, async (c) => {
   const action = c.req.param("action");
   if (!["analyze", "ask", "extract"].includes(action)) return fail(c, 404, "server", "Unknown action");
   const uid = await userId(c);
-  if (!uid) return fail(c, 401, "auth", "Sign-in required.");
   if (await rateLimited(uid)) return fail(c, 429, "rate_limit", "Request limit reached. Wait a few minutes.");
 
   const body = await c.req.json().catch(() => null);

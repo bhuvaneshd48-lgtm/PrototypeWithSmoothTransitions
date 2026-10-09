@@ -67,6 +67,10 @@ export type ConversationRecord = {
   transcribed: boolean
   me: string | null
   analysis: AnalysisResult | null
+  /** First message id covered by the catch-up; null/undefined = whole chat. */
+  readFrom?: string | null
+  /** First message that was new compared with an earlier import of this chat. */
+  sinceLastId?: string | null
 }
 
 export type AskAnswer = {

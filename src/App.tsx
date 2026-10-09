@@ -5,6 +5,7 @@ import type { AskAnswer, ConversationRecord, ParseResult, SourceType, UrgencyLev
 import { fileKind, ImportError, parseFile, parseText, participants, reindex } from '@/lib/parsers'
 import { createRepository, consumeShareInbox, sharedItemToFile, type ConversationRepository } from '@/lib/storage'
 import { maskMessages, toPayload, unmask } from '@/lib/privacy'
+import { findSinceLast, inRange } from '@/lib/range'
 import { backendConfigured, LANGUAGES, getLanguage, setLanguage, callGemini, errorMessage, ApiError } from '@/lib/api'
 import { validateAnalysis, validateAnswer, validateExtract } from '@/lib/validate'
 import { checkVisionSelection, prepareVisionParts } from '@/lib/vision'
@@ -176,7 +177,9 @@ export default function App() {
       set({ state: 'running', phase: 0 })
       setAnnounce('Preparing messages')
       try {
-        const { prepared } = maskMessages(record.messages, record.privacy)
+        const { prepared: all } = maskMessages(record.messages, record.privacy)
+        const covered = new Set(inRange(record).map((m) => m.id))
+        const prepared = all.filter((m) => covered.has(m.id))
         const payload = { messages: toPayload(prepared) }
         set({ state: 'running', phase: 1 })
         setAnnounce('Gemini is reading the conversation')
@@ -209,6 +212,13 @@ export default function App() {
       transcribed: draft.transcribed,
       me: null,
       analysis: null,
+    }
+    // Re-importing a chat you've seen before: catch up only on what's new by default.
+    const since = findSinceLast(record.messages, conversations)
+    if (since) {
+      record.sinceLastId = since.fromId
+      record.readFrom = since.fromId
+      record.me = conversations.find((c) => c.title === since.previousTitle)?.me ?? null
     }
     await save(record)
     setActiveId(record.id)
@@ -300,9 +310,9 @@ export default function App() {
 
         <header className="sticky top-0 z-30 border-b border-ink/5 bg-[color-mix(in_srgb,var(--u-base)_70%,transparent)] backdrop-blur-md">
           <div className="mx-auto flex h-16 max-w-[1500px] items-center gap-3 px-4 sm:px-6">
-            <p className="font-display text-2xl font-black uppercase tracking-tight">
+            <button type="button" onClick={() => (setView('import'), setDraft(null), window.scrollTo({ top: 0 }))} aria-label="Unread home" title="Back to home" className="font-display text-2xl font-black uppercase tracking-tight">
               Unread<span className="text-[color:var(--u-accent)] transition-colors duration-700">.</span>
-            </p>
+            </button>
             {view !== 'workspace' && conversations.length ? (
               <button type="button" onClick={() => (setView('workspace'), setActiveId((id) => id ?? conversations[0].id), setDraft(null))} className="ml-2 hidden items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-ink-soft hover:bg-card sm:inline-flex">
                 <ArrowLeft className="size-4" aria-hidden /> Your conversations
@@ -344,7 +354,7 @@ export default function App() {
           <AnimatePresence mode="wait">
             {view === 'import' && booted ? (
               <motion.div key="import" exit={{ opacity: 0, y: -40, filter: 'blur(10px)' }} transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}>
-                {!conversations.length ? <Landing reduced={reduced} dark={prefs.theme === 'dark'} /> : null}
+                <Landing reduced={reduced} dark={prefs.theme === 'dark'} />
               <ImportPanel
                 intro={!conversations.length}
                 onPaste={(text) => {
@@ -372,6 +382,10 @@ export default function App() {
                 masked={masked}
                 status={statuses[active.id] ?? { state: 'idle' }}
                 onRetry={() => void runAnalysis(active)}
+                onRange={(readFrom) => {
+                  const next = { ...active, readFrom, analysis: null }
+                  void save(next).then(() => runAnalysis(next))
+                }}
                 onSetMe={(me) => void save({ ...active, me })}
                 onUrgency={setUrgency}
                 reduced={reduced}

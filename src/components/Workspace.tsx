@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, LayoutGroup, motion } from 'motion/react'
-import { Check, LoaderCircle, MessageSquareText, RotateCcw, Sparkles, User } from 'lucide-react'
+import { Check, Copy, History, LoaderCircle, MessageSquareText, RotateCcw, Share2, Sparkles, User } from 'lucide-react'
 import type { AskAnswer, ConversationRecord, UrgencyLevel } from '@/types'
 import { applyDepth, applyLens, buildItems, DEPTH_LABEL, SECTION_TITLE, type CatchUpItem, type Depth, type Lens, type Section } from '@/lib/catchup'
 import { highestInAnalysis, LEVEL_LABEL, messageLevel, messagesById, urgencyMap } from '@/lib/urgency'
@@ -11,6 +11,8 @@ import SourceDrawer from './SourceDrawer'
 import AskPanel from './AskPanel'
 import UrgencyBadge from './UrgencyBadge'
 import Dialog from './Dialog'
+import { inRange, presetStart, type RangePreset } from '@/lib/range'
+import type { AnalysisResult } from '@/types'
 
 export type AnalysisStatus = { state: 'idle' } | { state: 'running'; phase: number } | { state: 'error'; message: string }
 
@@ -19,6 +21,7 @@ type Props = {
   masked: MaskedConversation
   status: AnalysisStatus
   onRetry: () => void
+  onRange: (readFrom: string | null) => void
   onSetMe: (me: string | null) => void
   onUrgency: (level: UrgencyLevel) => void
   reduced: boolean
@@ -49,7 +52,31 @@ function ts(t: string | null) {
   return Number.isNaN(d.getTime()) ? t : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
-export default function Workspace({ record, masked, status, onRetry, onSetMe, onUrgency, reduced, rail, askState }: Props) {
+const RANGE_LABEL: Record<RangePreset, string> = {
+  'since-last': 'Since I last read',
+  all: 'Whole chat',
+  '24h': 'Last 24 hours',
+  '7d': 'Last 7 days',
+  'last-100': 'Last 100 messages',
+}
+
+function catchUpText(title: string, a: AnalysisResult, unmask: (t: string) => string, scope: string): string {
+  const lines = [`Catch-up: ${title} (${scope})`, '', unmask(a.brief)]
+  const block = (head: string, items: string[]) => {
+    if (items.length) lines.push('', head, ...items.map((t) => `• ${t}`))
+  }
+  block('Do first', a.highlights.map((h) => unmask(h.text)))
+  block(
+    'Action items',
+    a.actionItems.filter((x) => x.status !== 'done').map((x) => [unmask(x.text), x.owner ? `— ${unmask(x.owner)}` : '', x.dueAt ? `(due ${unmask(x.dueAt)})` : ''].filter(Boolean).join(' ')),
+  )
+  block('Decisions', a.decisions.map((d) => unmask(d.text)))
+  block('Mentions & deadlines', a.mentions.map((m) => unmask(m.text)))
+  lines.push('', '— via Unread')
+  return lines.join('\n')
+}
+
+export default function Workspace({ record, masked, status, onRetry, onRange, onSetMe, onUrgency, reduced, rail, askState }: Props) {
   const analysis = record.analysis
   const [depth, setDepth] = useState<Depth>('standard')
   const [lens, setLens] = useState<Lens>('all')
@@ -122,6 +149,26 @@ export default function Workspace({ record, masked, status, onRetry, onSetMe, on
   }, [analysis, record.me])
 
   const stamps = record.messages.map((m) => m.timestamp).filter(Boolean) as string[]
+  const covered = inRange(record)
+  const presets = (['since-last', 'all', '24h', '7d', 'last-100'] as RangePreset[])
+    .map((p) => ({ p, start: presetStart(record.messages, p, record.sinceLastId ?? null) }))
+    .filter((x): x is { p: RangePreset; start: string | null } => x.start !== undefined)
+  const current = presets.find((x) => x.start === (record.readFrom ?? null))?.p ?? 'all'
+  const scope = RANGE_LABEL[current].toLowerCase()
+  const [copied, setCopied] = useState<'copy' | 'share' | null>(null)
+  const copyCatchUp = async (mode: 'copy' | 'share') => {
+    if (!analysis) return
+    const text = catchUpText(record.title, analysis, unmask, `${covered.length} messages, ${scope}`)
+    try {
+      if (mode === 'share' && navigator.share) await navigator.share({ title: `Catch-up: ${record.title}`, text })
+      else await navigator.clipboard.writeText(text)
+      setCopied(mode)
+      setTimeout(() => setCopied(null), 2200)
+    } catch {
+      /* share sheet dismissed */
+    }
+  }
+  const canShare = typeof navigator !== 'undefined' && !!navigator.share
   const askDisabled = status.state === 'running' ? 'Wait for the analysis to finish…' : !analysis ? 'Analyze the conversation first' : null
   const ask = <AskPanel {...askState} suggestions={suggestions} activeKey={activeKey} onActivate={activate} onCite={onCite} byId={byId} unmask={unmask} disabled={askDisabled} />
 
@@ -169,6 +216,31 @@ export default function Workspace({ record, masked, status, onRetry, onSetMe, on
             ))}
           </dl>
 
+          {presets.length > 1 ? (
+            <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+              <label className="inline-flex items-center gap-2 rounded-full border border-ink/15 bg-paper/50 py-1.5 pl-3 pr-2 text-sm font-medium focus-within:border-ink">
+                <History className="size-4 text-[color:var(--u-accent)]" aria-hidden />
+                <span className="text-ink-soft">Catch up on</span>
+                <select
+                  value={current}
+                  disabled={status.state === 'running'}
+                  onChange={(e) => onRange(presets.find((x) => x.p === e.target.value)?.start ?? null)}
+                  className="cursor-pointer bg-transparent font-semibold outline-none disabled:opacity-50"
+                >
+                  {presets.map(({ p }) => (
+                    <option key={p} value={p} className="bg-card text-ink">
+                      {RANGE_LABEL[p]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <p className="font-mono text-[11px] uppercase tracking-wider text-muted">
+                {covered.length === record.messages.length ? `All ${record.messages.length.toLocaleString()} messages` : `${covered.length.toLocaleString()} of ${record.messages.length.toLocaleString()} messages`}
+                {current === 'since-last' ? ' · new since your last import' : ''}
+              </p>
+            </div>
+          ) : null}
+
           <div aria-live="polite">
             {status.state === 'running' ? (
               <Pipeline phase={status.phase} count={record.messages.length} />
@@ -181,7 +253,21 @@ export default function Workspace({ record, masked, status, onRetry, onSetMe, on
                 </button>
               </div>
             ) : analysis ? (
-              <p className="mt-6 max-w-3xl text-xl leading-relaxed text-ink sm:text-2xl">{unmask(analysis.brief)}</p>
+              <>
+                <p className="mt-6 max-w-3xl text-xl leading-relaxed text-ink sm:text-2xl">{unmask(analysis.brief)}</p>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  <button type="button" onClick={() => void copyCatchUp('copy')} className="inline-flex items-center gap-2 rounded-full bg-ink px-4 py-2 text-sm font-semibold text-paper">
+                    {copied === 'copy' ? <Check className="size-4" aria-hidden /> : <Copy className="size-4" aria-hidden />}
+                    {copied === 'copy' ? 'Copied — paste it in the group' : 'Copy catch-up'}
+                  </button>
+                  {canShare ? (
+                    <button type="button" onClick={() => void copyCatchUp('share')} className="inline-flex items-center gap-2 rounded-full border border-ink/15 bg-card/70 px-4 py-2 text-sm font-semibold hover:border-ink">
+                      <Share2 className="size-4" aria-hidden /> Share
+                    </button>
+                  ) : null}
+                </div>
+                <p className="sr-only" role="status">{copied ? 'Catch-up copied to clipboard' : ''}</p>
+              </>
             ) : (
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <p className="text-ink-soft">This conversation hasn’t been analyzed yet.</p>

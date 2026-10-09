@@ -33,7 +33,7 @@ export class ApiError extends Error {
 
 const MESSAGES: Record<ApiErrorCode, string> = {
   not_connected: 'The Gemini backend is not connected yet. Connect Supabase and add GEMINI_API_KEY to enable analysis.',
-  auth: 'Could not start a secure anonymous session. Anonymous sign-ins may be disabled in Supabase Auth settings.',
+  auth: 'The server rejected the connection. Redeploy the Edge Function from Settings and try again.',
   rate_limit: 'You have reached the request limit for now. Wait a few minutes and try again.',
   too_large: 'This conversation is too large for one request. Choose a shorter range.',
   safety: 'Gemini declined to process this content. Try masking or removing sensitive parts.',
@@ -49,11 +49,13 @@ export function errorMessage(e: unknown): string {
   return MESSAGES.server
 }
 
-let client: SupabaseClient | null = null
+// Kept on globalThis so hot reloads reuse one auth client instead of creating duplicates.
+const g = globalThis as { __unreadSupabase?: SupabaseClient }
 
 async function accessToken(): Promise<string> {
   if (!info) throw new ApiError('not_connected', MESSAGES.not_connected)
-  client ??= createClient(`https://${info.projectId}.supabase.co`, info.publicAnonKey, { auth: { persistSession: true, storageKey: 'unread-auth' } })
+  g.__unreadSupabase ??= createClient(`https://${info.projectId}.supabase.co`, info.publicAnonKey, { auth: { persistSession: true, storageKey: 'unread-auth' } })
+  const client = g.__unreadSupabase
   const { data } = await client.auth.getSession()
   if (data.session?.access_token) return data.session.access_token
   const { data: signIn, error } = await client.auth.signInAnonymously().catch(() => ({ data: { session: null }, error: true }))
@@ -82,7 +84,7 @@ async function once<T>(action: Action, body: unknown, signal: AbortSignal): Prom
   if (!res.ok) {
     const code = (json?.error?.code as ApiErrorCode) ?? (res.status === 401 ? 'auth' : res.status === 429 ? 'rate_limit' : res.status === 413 ? 'too_large' : 'server')
     const known = code in MESSAGES ? code : 'server'
-    throw new ApiError(known, json?.error?.message || MESSAGES[known])
+    throw new ApiError(known, known === 'auth' ? MESSAGES.auth : json?.error?.message || MESSAGES[known])
   }
   if (!json || json.data === undefined) throw new ApiError('invalid_response', MESSAGES.invalid_response)
   return json.data
