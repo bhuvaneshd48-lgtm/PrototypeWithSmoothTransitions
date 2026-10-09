@@ -1,3 +1,4 @@
+import { unzipSync } from 'fflate'
 import type { ChatMessage, ParseResult } from '@/types'
 
 export const LIMITS = {
@@ -181,13 +182,8 @@ export function chooseZipChatEntry(names: string[]): string | null {
   return txt.find((n) => base(n) === '_chat.txt') ?? txt.find((n) => /^WhatsApp Chat/i.test(base(n))) ?? txt[0] ?? null
 }
 
-/** fflate is loaded on demand so it isn't part of the initial bundle. */
-export async function parseZip(bytes: Uint8Array): Promise<ParseResult> {
-  if (bytes.byteLength > LIMITS.maxFileBytes) throw new ImportError('This archive is larger than 8 MB.')
-  const { unzipSync } = await import('fflate')
+export function parseZip(bytes: Uint8Array): ParseResult {
   let mediaSkipped = 0
-  let expandedBytes = 0
-  let oversized = false
   const names: string[] = []
   let files: Record<string, Uint8Array>
   try {
@@ -195,11 +191,6 @@ export async function parseZip(bytes: Uint8Array): Promise<ParseResult> {
       filter: (f) => {
         if (f.name.endsWith('/')) return false
         if (/\.txt$/i.test(f.name)) {
-          expandedBytes += f.originalSize
-          if (expandedBytes > LIMITS.maxFileBytes) {
-            oversized = true
-            return false
-          }
           names.push(f.name)
           return true
         }
@@ -210,7 +201,6 @@ export async function parseZip(bytes: Uint8Array): Promise<ParseResult> {
   } catch {
     throw new ImportError('This archive could not be opened. Re-export the chat and try again.')
   }
-  if (oversized) throw new ImportError('The expanded chat text is larger than 8 MB. Export a shorter range.')
   const entry = chooseZipChatEntry(names)
   if (!entry) throw new ImportError('No chat text (.txt) was found in this archive.')
   const result = parseText(new TextDecoder().decode(files[entry]))

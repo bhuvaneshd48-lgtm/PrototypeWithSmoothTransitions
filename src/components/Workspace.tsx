@@ -148,16 +148,11 @@ export default function Workspace({ record, masked, status, onRetry, onRange, on
     return s.slice(0, 4)
   }, [analysis, record.me])
 
-  // Derived from the full message list; memoized so focus/hover re-renders stay cheap on long chats.
-  const stamps = useMemo(() => record.messages.map((m) => m.timestamp).filter(Boolean) as string[], [record.messages])
-  const covered = useMemo(() => inRange(record), [record.messages, record.readFrom])
-  const presets = useMemo(
-    () =>
-      (['since-last', 'all', '24h', '7d', 'last-100'] as RangePreset[])
-        .map((p) => ({ p, start: presetStart(record.messages, p, record.sinceLastId ?? null) }))
-        .filter((x): x is { p: RangePreset; start: string | null } => x.start !== undefined),
-    [record.messages, record.sinceLastId],
-  )
+  const stamps = record.messages.map((m) => m.timestamp).filter(Boolean) as string[]
+  const covered = inRange(record)
+  const presets = (['since-last', 'all', '24h', '7d', 'last-100'] as RangePreset[])
+    .map((p) => ({ p, start: presetStart(record.messages, p, record.sinceLastId ?? null) }))
+    .filter((x): x is { p: RangePreset; start: string | null } => x.start !== undefined)
   const current = presets.find((x) => x.start === (record.readFrom ?? null))?.p ?? 'all'
   const scope = RANGE_LABEL[current].toLowerCase()
   const [copied, setCopied] = useState<'copy' | 'share' | null>(null)

@@ -1,6 +1,4 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
-import { LANGUAGES, supportedLanguage } from '../../supabase/functions/_shared/languages'
-export { LANGUAGES }
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
 // utils/supabase/info.tsx is generated when a Supabase project is connected.
 const infoModules = import.meta.glob<{ projectId: string; publicAnonKey: string }>('/utils/supabase/info.tsx', { eager: true })
@@ -9,24 +7,15 @@ const info = Object.values(infoModules)[0] ?? null
 /** Route prefix of the generated Supabase Edge Function server. */
 const FUNCTION_ROUTE = 'make-server-82138c68'
 
+export const LANGUAGES = ['English', 'Hindi', 'Bengali', 'Tamil', 'Telugu', 'Marathi', 'Gujarati', 'Kannada', 'Malayalam', 'Punjabi', 'Odia', 'Urdu', 'Assamese', 'Spanish', 'French', 'German', 'Portuguese', 'Italian', 'Russian', 'Arabic', 'Chinese (Simplified)', 'Japanese', 'Korean', 'Indonesian', 'Turkish', 'Vietnamese', 'Thai', 'Swahili'] as const
+
 const LANG_KEY = 'unread-language'
-let sessionLanguage: string | null = null
 export function getLanguage(): string {
-  if (sessionLanguage) return sessionLanguage
-  try {
-    const l = localStorage.getItem(LANG_KEY)
-    return supportedLanguage(l)
-  } catch {
-    return 'English'
-  }
+  const l = localStorage.getItem(LANG_KEY)
+  return l && (LANGUAGES as readonly string[]).includes(l) ? l : 'English'
 }
 export function setLanguage(l: string) {
-  sessionLanguage = supportedLanguage(l)
-  try {
-    localStorage.setItem(LANG_KEY, sessionLanguage)
-  } catch {
-    // Storage may be disabled; language remains available in React state.
-  }
+  localStorage.setItem(LANG_KEY, l)
 }
 
 export const backendConfigured = !!info?.projectId && !!info?.publicAnonKey
@@ -65,8 +54,6 @@ const g = globalThis as { __unreadSupabase?: SupabaseClient }
 
 async function accessToken(): Promise<string> {
   if (!info) throw new ApiError('not_connected', MESSAGES.not_connected)
-  // Loaded on first AI request only; keeps ~200 kB out of the initial bundle.
-  const { createClient } = await import('@supabase/supabase-js')
   g.__unreadSupabase ??= createClient(`https://${info.projectId}.supabase.co`, info.publicAnonKey, { auth: { persistSession: true, storageKey: 'unread-auth' } })
   const client = g.__unreadSupabase
   const { data } = await client.auth.getSession()
@@ -80,9 +67,7 @@ async function accessToken(): Promise<string> {
 type Action = 'analyze' | 'ask' | 'extract'
 
 async function once<T>(action: Action, body: unknown, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) throw new ApiError('aborted', MESSAGES.aborted)
   const token = await accessToken()
-  if (signal.aborted) throw new ApiError('aborted', MESSAGES.aborted)
   let res: Response
   try {
     res = await fetch(`https://${info!.projectId}.supabase.co/functions/v1/${FUNCTION_ROUTE}/${action}`, {
@@ -98,34 +83,22 @@ async function once<T>(action: Action, body: unknown, signal: AbortSignal): Prom
   const json = (await res.json().catch(() => null)) as { data?: T; error?: { code?: string; message?: string } } | null
   if (!res.ok) {
     const code = (json?.error?.code as ApiErrorCode) ?? (res.status === 401 ? 'auth' : res.status === 429 ? 'rate_limit' : res.status === 413 ? 'too_large' : 'server')
-    const known = Object.prototype.hasOwnProperty.call(MESSAGES, code) ? code : 'server'
+    const known = code in MESSAGES ? code : 'server'
     throw new ApiError(known, known === 'auth' ? MESSAGES.auth : json?.error?.message || MESSAGES[known])
   }
   if (!json || json.data === undefined) throw new ApiError('invalid_response', MESSAGES.invalid_response)
   return json.data
 }
 
-/** Retries transport failures only; provider fallbacks belong to the server. */
+/** Calls the protected Gemini function with one retry for transient failures. */
 export async function callGemini<T>(action: Action, body: unknown, signal: AbortSignal): Promise<T> {
   if (!backendConfigured) throw new ApiError('not_connected', MESSAGES.not_connected)
   try {
     return await once<T>(action, body, signal)
   } catch (e) {
-    const transient = e instanceof ApiError && e.code === 'network'
+    const transient = e instanceof ApiError && (e.code === 'network' || e.code === 'server' || e.code === 'timeout')
     if (!transient || signal.aborted) throw e
-    await new Promise<void>((resolve, reject) => {
-      const cancel = () => {
-        clearTimeout(timer)
-        signal.removeEventListener('abort', cancel)
-        reject(new ApiError('aborted', MESSAGES.aborted))
-      }
-      const timer = setTimeout(() => {
-        signal.removeEventListener('abort', cancel)
-        resolve()
-      }, 900)
-      signal.addEventListener('abort', cancel, { once: true })
-      if (signal.aborted) cancel()
-    })
+    await new Promise((r) => setTimeout(r, 900))
     return once<T>(action, body, signal)
   }
 }

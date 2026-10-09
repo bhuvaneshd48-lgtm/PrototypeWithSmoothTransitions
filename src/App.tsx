@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, MotionConfig, motion } from 'motion/react'
 import { ArrowLeft, HardDrive, Languages, Moon, Settings, Sparkles, Sun } from 'lucide-react'
 import type { AskAnswer, ConversationRecord, ParseResult, SourceType, UrgencyLevel } from '@/types'
@@ -13,15 +13,10 @@ import ImportPanel from '@/components/ImportPanel'
 import Landing from '@/components/landing/Landing'
 import Curtain from '@/components/Curtain'
 import { scrollToTarget, startSmoothScroll, stopSmoothScroll } from '@/lib/scroll'
-import type { Draft } from '@/components/ReviewPanel'
-import type { AnalysisStatus } from '@/components/Workspace'
+import ReviewPanel, { type Draft } from '@/components/ReviewPanel'
+import Workspace, { type AnalysisStatus } from '@/components/Workspace'
 import ConversationRail from '@/components/ConversationRail'
-import type { Preferences } from '@/components/SettingsDialog'
-
-// Screens not needed for the first paint are split into their own chunks.
-const ReviewPanel = lazy(() => import('@/components/ReviewPanel'))
-const Workspace = lazy(() => import('@/components/Workspace'))
-const SettingsDialog = lazy(() => import('@/components/SettingsDialog'))
+import SettingsDialog, { type Preferences } from '@/components/SettingsDialog'
 
 type View = 'import' | 'review' | 'workspace'
 type InstallPrompt = Event & { prompt: () => Promise<void> }
@@ -47,8 +42,6 @@ function defaultTitle(result: ParseResult, fileName: string | null) {
 export default function App() {
   const [repo, setRepo] = useState<ConversationRepository | null>(null)
   const [conversations, setConversations] = useState<ConversationRecord[]>([])
-  const conversationsRef = useRef(conversations)
-  conversationsRef.current = conversations
   const [activeId, setActiveId] = useState<string | null>(null)
   const [view, setView] = useState<View>('import')
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -73,21 +66,7 @@ export default function App() {
   const masked = useMemo(() => (active ? maskMessages(active.messages, active.privacy) : null), [active?.messages, active?.privacy])
 
   const [language, setLang] = useState(getLanguage)
-  useEffect(() => {
-    askAbort.current?.abort()
-    setAsk({ busy: false, error: null, pending: null })
-  }, [activeId])
-  useEffect(() => {
-    try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
-    } catch {
-      // Preferences still work for this session when storage is blocked.
-    }
-  }, [prefs])
-  useEffect(() => () => {
-    analyzeAbort.current?.abort()
-    askAbort.current?.abort()
-  }, [])
+  useEffect(() => localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)), [prefs])
   useEffect(() => {
     document.documentElement.classList.toggle('dark', prefs.theme === 'dark')
     document.documentElement.style.colorScheme = prefs.theme
@@ -160,14 +139,11 @@ export default function App() {
   // Boot: open storage, load history, then consume anything shared via the PWA share target.
   useEffect(() => {
     let cancelled = false
-    let repository: ConversationRepository | null = null
     ;(async () => {
       const r = await createRepository()
-      repository = r
-      if (cancelled) return r.close()
+      if (cancelled) return
       setRepo(r)
       const list = await r.list().catch(() => [])
-      if (cancelled) return
       setConversations(list)
       setBooted(true)
       const params = new URLSearchParams(location.search)
@@ -189,7 +165,6 @@ export default function App() {
     })()
     return () => {
       cancelled = true
-      repository?.close()
     }
   }, [handleFiles])
 
@@ -209,14 +184,10 @@ export default function App() {
         set({ state: 'running', phase: 1 })
         setAnnounce('Gemini is reading the conversation')
         const raw = await callGemini<{ analysis: unknown; model: string }>('analyze', payload, ctrl.signal)
-        if (ctrl.signal.aborted) return
         set({ state: 'running', phase: 2 })
         setAnnounce('Linking evidence')
         const analysis = validateAnalysis(raw.analysis, prepared, raw.model)
-        const latest = conversationsRef.current.find((item) => item.id === record.id)
-        if (!latest || ctrl.signal.aborted) return
-        // Preserve renames/preferences made while the provider was working.
-        await save({ ...latest, analysis })
+        await save({ ...record, analysis })
         set({ state: 'idle' })
         setAnnounce('Catch-up ready')
       } catch (e) {
@@ -284,25 +255,18 @@ export default function App() {
     setAsk({ busy: true, error: null, pending: question })
     try {
       // Mask the question with the same placeholders as the conversation.
+      const withQ = maskMessages([...active.messages, { id: '__q', sourceIndex: -1, sender: null, timestamp: null, text: question }], active.privacy)
+      const qMasked = withQ.prepared[withQ.prepared.length - 1].text
+      const prepared = withQ.prepared.slice(0, -1)
       const prev = answers[active.id]?.[0]?.question
-      const context = [
-        ...active.messages,
-        { id: '__q', sourceIndex: -1, sender: null, timestamp: null, text: question },
-        ...(prev ? [{ id: '__previous', sourceIndex: -1, sender: null, timestamp: null, text: prev }] : []),
-      ]
-      const withQ = maskMessages(context, active.privacy)
-      const prepared = withQ.prepared.slice(0, active.messages.length)
-      const qMasked = withQ.prepared[active.messages.length].text
-      const previousQuestion = prev ? withQ.prepared[active.messages.length + 1].text : null
-      const raw = await callGemini<unknown>('ask', { messages: toPayload(prepared), question: qMasked, previousQuestion }, ctrl.signal)
-      if (ctrl.signal.aborted) return
+      const raw = await callGemini<unknown>('ask', { messages: toPayload(prepared), question: qMasked, previousQuestion: prev ? maskMessages([{ id: 'p', sourceIndex: 0, sender: null, timestamp: null, text: prev }], active.privacy).prepared[0].text : null }, ctrl.signal)
       const answer = validateAnswer(raw, prepared, question, active.analysis)
       answer.answer = unmask(answer.answer, withQ.map)
       if (answer.urgencyReason) answer.urgencyReason = unmask(answer.urgencyReason, withQ.map)
       setAnswers((m) => ({ ...m, [active.id]: [answer, ...(m[active.id] ?? [])] }))
       setAsk({ busy: false, error: null, pending: null })
     } catch (e) {
-      if (e instanceof ApiError && e.code === 'aborted') return
+      if (e instanceof ApiError && e.code === 'aborted') return setAsk({ busy: false, error: null, pending: null })
       setAsk({ busy: false, error: errorMessage(e), pending: question })
     }
   }
@@ -312,31 +276,25 @@ export default function App() {
     if (r) void save({ ...r, title })
   }
   const remove = async (id: string) => {
-    analyzeAbort.current?.abort()
-    askAbort.current?.abort()
-    setAsk({ busy: false, error: null, pending: null })
+    if (id === activeId) analyzeAbort.current?.abort()
     const rest = conversations.filter((c) => c.id !== id)
     setConversations(rest)
-    let deleted = true
-    await repo?.remove(id).catch(() => { deleted = false })
+    await repo?.remove(id).catch(() => undefined)
     if (id === activeId) {
       setActiveId(rest[0]?.id ?? null)
       if (!rest.length) setView('import')
     }
-    setAnnounce(deleted ? 'Conversation deleted from this device' : 'Could not delete stored history. It may reappear on reload; retry deletion.')
+    setAnnounce('Conversation deleted from this device')
   }
   const clearAll = async () => {
     analyzeAbort.current?.abort()
-    askAbort.current?.abort()
-    setAsk({ busy: false, error: null, pending: null })
     setConversations([])
     setAnswers({})
-    let deleted = true
-    await repo?.clear().catch(() => { deleted = false })
+    await repo?.clear().catch(() => undefined)
     setActiveId(null)
     setView('import')
     setSettingsOpen(false)
-    setAnnounce(deleted ? 'All conversations deleted from this device' : 'Could not delete stored history. It may reappear on reload; retry deletion.')
+    setAnnounce('All conversations deleted from this device')
   }
 
   const shellUrgency: UrgencyLevel = view === 'workspace' ? urgency : 'low'
@@ -393,7 +351,6 @@ export default function App() {
         <Curtain token={view} reduced={reduced} label={view === 'review' ? 'Review' : view === 'workspace' ? 'Catch-up' : 'Import'} />
 
         <div className="relative pt-4">
-          <Suspense fallback={null}>
           <AnimatePresence mode="wait">
             {view === 'import' && booted ? (
               <motion.div key="import" exit={{ opacity: 0, y: -40, filter: 'blur(10px)' }} transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}>
@@ -455,11 +412,9 @@ export default function App() {
               />
             ) : null}
           </AnimatePresence>
-          </Suspense>
         </div>
 
-        <Suspense fallback={null}>
-          <SettingsDialog
+        <SettingsDialog
           open={settingsOpen}
           onClose={() => setSettingsOpen(false)}
           prefs={prefs}
@@ -473,7 +428,6 @@ export default function App() {
             setInstallPrompt(null)
           }}
         />
-        </Suspense>
       </div>
     </MotionConfig>
   )

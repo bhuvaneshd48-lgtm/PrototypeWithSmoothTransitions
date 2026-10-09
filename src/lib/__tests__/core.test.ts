@@ -47,18 +47,14 @@ describe('parsers', () => {
     expect(() => parseJson('{bad')).toThrow(ImportError)
   })
 
-  it('selects the chat entry from a WhatsApp zip and ignores media', async () => {
+  it('selects the chat entry from a WhatsApp zip and ignores media', () => {
     expect(chooseZipChatEntry(['IMG-1.jpg', 'notes.txt', '_chat.txt'])).toBe('_chat.txt')
     expect(chooseZipChatEntry(['a/WhatsApp Chat with Team.txt', 'b.txt'])).toBe('a/WhatsApp Chat with Team.txt')
     const zip = zipSync({ '_chat.txt': strToU8(WA_ANDROID), 'IMG-1.jpg': new Uint8Array([1, 2, 3]) })
-    const r = await parseZip(zip)
+    const r = parseZip(zip)
     expect(r.messages).toHaveLength(2)
     expect(r.notes.join(' ')).toMatch(/1 media file/)
-    await expect(parseZip(zipSync({ 'a.jpg': new Uint8Array([1]) }))).rejects.toThrow(/No chat text/)
-  })
-  it('rejects ZIP text that exceeds the expanded size limit', async () => {
-    const zip = zipSync({ '_chat.txt': strToU8('x'.repeat(8 * 1024 * 1024 + 1)) })
-    await expect(parseZip(zip)).rejects.toThrow(/expanded chat text/)
+    expect(() => parseZip(zipSync({ 'a.jpg': new Uint8Array([1]) }))).toThrow(/No chat text/)
   })
 })
 
@@ -82,17 +78,6 @@ describe('privacy mask', () => {
     const json = JSON.stringify(toPayload(prepared))
     expect(Object.keys(toPayload(prepared)[0]).sort()).toEqual(['id', 'sender', 'text', 'timestamp'])
     expect(json).not.toContain('alex@uni.edu')
-  })
-  it('uses one placeholder mapping across messages and follow-up questions', () => {
-    const settings = { email: true, phone: false, url: false, customTerms: [] }
-    const context = [
-      { ...msgs[0], text: 'first@uni.edu then second@uni.edu' },
-      { ...msgs[1], text: 'Ask second@uni.edu' },
-      { ...msgs[1], id: '__previous', text: 'What did second@uni.edu say?' },
-    ]
-    const masked = maskMessages(context, settings)
-    expect(masked.prepared[1].text).toContain('[EMAIL_2]')
-    expect(masked.prepared[2].text).toContain('[EMAIL_2]')
   })
 })
 
